@@ -8,9 +8,12 @@ Usage:
     python3 checker.py --once   # runs once and exits (for testing)
 """
 
+import os
 import sys
 import time
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from config import Config
 from moodle_client import MoodleClient
@@ -108,6 +111,9 @@ def main():
         run_check()
         return
 
+    # Start a tiny HTTP server so Railway knows we're alive
+    _start_health_server()
+
     # Infinite loop for deployment (Railway, etc.)
     logger.info(
         "Starting tracker loop — checking every %d seconds (%d minutes)",
@@ -122,6 +128,23 @@ def main():
             Config.CHECK_INTERVAL_SECONDS // 60,
         )
         time.sleep(Config.CHECK_INTERVAL_SECONDS)
+
+
+def _start_health_server():
+    """Tiny HTTP server so Railway sees a listening port and doesn't mark us as crashed."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        def log_message(self, *args):
+            pass  # silence request logs
+
+    port = int(os.getenv("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info("Health server listening on port %d", port)
 
 
 if __name__ == "__main__":
