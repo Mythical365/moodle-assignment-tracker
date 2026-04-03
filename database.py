@@ -1,5 +1,4 @@
 import os
-import time
 import requests
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -12,7 +11,7 @@ HEADERS = {
 }
 
 def init_db():
-    pass  # Supabase table already exists, nothing to init
+    pass
 
 def check_assignment(assignment_id, due_date):
     res = requests.get(
@@ -50,3 +49,12 @@ def check_quiz(quiz_id, close_time):
     return None
 
 def save_quiz(q, course_id, course_name):
+    requests.post(
+        f"{SUPABASE_URL}/rest/v1/seen_items",
+        headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
+        json={
+            "id": f"quiz_{q['id']}",
+            "item_type": "quiz",
+            "due_date": q.get("timeclose", 0)
+        }
+    )
