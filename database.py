@@ -1,5 +1,9 @@
 import os
+import time
+import logging
 import requests
+
+logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
@@ -7,54 +11,151 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
 }
 
+
 def init_db():
-    pass
+    pass  # Supabase table is created in the dashboard
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _get(item_id):
+    res = requests.get(
+        f"{SUPABASE_URL}/rest/v1/seen_items?id=eq.{item_id}&select=*",
+        headers=HEADERS,
+    )
+    data = res.json()
+    return data[0] if data else None
+
+
+def _upsert(item_id, item_type, due_date, name, course_name):
+    """Insert or update a row. Never touches the `reminded` column so it
+    keeps its value on updates."""
+    requests.post(
+        f"{SUPABASE_URL}/rest/v1/seen_items",
+        headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
+        json={
+            "id": item_id,
+            "item_type": item_type,
+            "due_date": due_date,
+            "name": name,
+            "course_name": course_name,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Assignments
+# ---------------------------------------------------------------------------
 
 def check_assignment(assignment_id, due_date):
-    res = requests.get(
-        f"{SUPABASE_URL}/rest/v1/seen_items?id=eq.assign_{assignment_id}&select=due_date",
-        headers=HEADERS
-    )
-    data = res.json()
-    if not data:
+    row = _get(f"assign_{assignment_id}")
+    if not row:
         return "new"
-    if data[0]["due_date"] != due_date:
+    if row["due_date"] != due_date:
         return "reactivated"
     return None
+
 
 def save_assignment(a):
-    requests.post(
-        f"{SUPABASE_URL}/rest/v1/seen_items",
-        headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
-        json={
-            "id": f"assign_{a['id']}",
-            "item_type": "assignment",
-            "due_date": a.get("duedate", 0)
-        }
+    _upsert(
+        f"assign_{a['id']}", "assignment",
+        a.get("duedate", 0),
+        a["name"], a.get("_course_name", ""),
     )
 
+
+# ---------------------------------------------------------------------------
+# Quizzes
+# ---------------------------------------------------------------------------
+
 def check_quiz(quiz_id, close_time):
-    res = requests.get(
-        f"{SUPABASE_URL}/rest/v1/seen_items?id=eq.quiz_{quiz_id}&select=due_date",
-        headers=HEADERS
-    )
-    data = res.json()
-    if not data:
+    row = _get(f"quiz_{quiz_id}")
+    if not row:
         return "new"
-    if data[0]["due_date"] != close_time:
+    if row["due_date"] != close_time:
         return "reactivated"
     return None
 
+
 def save_quiz(q, course_id, course_name):
-    requests.post(
-        f"{SUPABASE_URL}/rest/v1/seen_items",
-        headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
-        json={
-            "id": f"quiz_{q['id']}",
-            "item_type": "quiz",
-            "due_date": q.get("timeclose", 0)
-        }
+    _upsert(
+        f"quiz_{q['id']}", "quiz",
+        q.get("timeclose", 0),
+        q["name"], course_name,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resources (uploaded files / folders)
+# ---------------------------------------------------------------------------
+
+def check_resource(module_id, timemodified):
+    row = _get(f"resource_{module_id}")
+    if not row:
+        return "new"
+    if row["due_date"] != timemodified:
+        return "updated"
+    return None
+
+
+def save_resource(r):
+    _upsert(
+        f"resource_{r['id']}", "resource",
+        r.get("timemodified", 0),
+        r["name"], r.get("_course_name", ""),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Forum / announcement posts
+# ---------------------------------------------------------------------------
+
+def check_forum_post(discussion_id):
+    return "new" if not _get(f"forum_{discussion_id}") else None
+
+
+def save_forum_post(d):
+    _upsert(
+        f"forum_{d['id']}", "forum",
+        d.get("created", 0),
+        d.get("name", ""), d.get("_course_name", ""),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Due-date reminders
+# ---------------------------------------------------------------------------
+
+def get_items_due_soon():
+    """Return assignments and quizzes due within 24h that haven't been reminded yet."""
+    now = int(time.time())
+    window = now + 86400
+
+    assignments, quizzes = [], []
+    for item_type in ("assignment", "quiz"):
+        res = requests.get(
+            f"{SUPABASE_URL}/rest/v1/seen_items"
+            f"?item_type=eq.{item_type}"
+            f"&due_date=gt.{now}"
+            f"&due_date=lte.{window}"
+            f"&reminded=eq.false"
+            f"&select=*",
+            headers=HEADERS,
+        )
+        bucket = assignments if item_type == "assignment" else quizzes
+        bucket.extend(res.json())
+
+    return assignments, quizzes
+
+
+def mark_reminded(item_id):
+    requests.patch(
+        f"{SUPABASE_URL}/rest/v1/seen_items?id=eq.{item_id}",
+        headers=HEADERS,
+        json={"reminded": True},
     )
