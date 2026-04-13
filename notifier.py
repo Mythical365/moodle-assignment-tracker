@@ -27,7 +27,7 @@ def _days_until(ts):
     return f"({int(days)} days away)"
 
 
-_MOD_ICON = {"resource": "📄", "folder": "📁"}
+_MOD_ICON = {"resource": "📄", "folder": "📁", "url": "🔗", "page": "📃"}
 
 
 def _post_webhook(payload):

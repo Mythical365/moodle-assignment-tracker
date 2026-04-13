@@ -29,13 +29,16 @@ def _get(item_id):
         headers=HEADERS,
     )
     data = res.json()
+    if not isinstance(data, list):
+        logger.error("Supabase _get error for %s: %s", item_id, data)
+        return None
     return data[0] if data else None
 
 
 def _upsert(item_id, item_type, due_date, name, course_name):
     """Insert or update a row. Never touches the `reminded` column so it
     keeps its value on updates."""
-    requests.post(
+    res = requests.post(
         f"{SUPABASE_URL}/rest/v1/seen_items",
         headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
         json={
@@ -46,6 +49,8 @@ def _upsert(item_id, item_type, due_date, name, course_name):
             "course_name": course_name,
         },
     )
+    if res.status_code not in (200, 201):
+        logger.error("Supabase _upsert failed for %s (HTTP %d): %s", item_id, res.status_code, res.text)
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +82,7 @@ def check_quiz(quiz_id, close_time):
     row = _get(f"quiz_{quiz_id}")
     if not row:
         return "new"
-    if row["due_date"] != close_time:
+    if row["due_date"] != (close_time or 0):
         return "reactivated"
     return None
 
@@ -98,7 +103,7 @@ def check_resource(module_id, timemodified):
     row = _get(f"resource_{module_id}")
     if not row:
         return "new"
-    if row["due_date"] != timemodified:
+    if row["due_date"] != (timemodified or 0):
         return "updated"
     return None
 
