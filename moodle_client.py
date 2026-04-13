@@ -81,7 +81,7 @@ class MoodleClient:
         logger.info("Found %d total quizzes", len(quizzes))
         return quizzes
 
-    TRACKED_MODNAMES = {"resource", "folder"}
+    TRACKED_MODNAMES = {"resource", "folder", "url", "page"}
 
     def get_course_resources(self, course_id, course_name):
         """Fetch file/folder modules for a single course."""
