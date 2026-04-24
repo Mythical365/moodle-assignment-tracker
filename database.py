@@ -5,9 +5,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-SUPABASE_URL = "https://your-project.supabase.co"  # owner's Supabase project
-SUPABASE_KEY = "your-anon-key"                      # owner's Supabase anon key
-USER = os.environ.get("MOODLE_USERNAME", "unknown")
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -26,7 +25,7 @@ def init_db():
 
 def _get(item_id):
     res = requests.get(
-        f"{SUPABASE_URL}/rest/v1/seen_items?id=eq.{USER}_{item_id}&select=*",
+        f"{SUPABASE_URL}/rest/v1/seen_items?id=eq.{item_id}&select=*",
         headers=HEADERS,
     )
     data = res.json()
@@ -43,8 +42,7 @@ def _upsert(item_id, item_type, due_date, name, course_name):
         f"{SUPABASE_URL}/rest/v1/seen_items",
         headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
         json={
-            "id": f"{USER}_{item_id}",
-            "user": USER,
+            "id": item_id,
             "item_type": item_type,
             "due_date": due_date,
             "name": name,
@@ -147,8 +145,7 @@ def get_items_due_soon():
     for item_type in ("assignment", "quiz"):
         res = requests.get(
             f"{SUPABASE_URL}/rest/v1/seen_items"
-            f"?user=eq.{USER}"
-            f"&item_type=eq.{item_type}"
+            f"?item_type=eq.{item_type}"
             f"&due_date=gt.{now}"
             f"&due_date=lte.{window}"
             f"&reminded=eq.false"
