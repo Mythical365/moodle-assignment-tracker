@@ -6,7 +6,7 @@ load_dotenv()
 
 class Config:
     # Moodle
-    MOODLE_URL = os.environ["MOODLE_URL"]           # e.g. https://moodle.uni.edu
+    MOODLE_URL = "https://e-learning.msa.edu.eg"
     MOODLE_USERNAME = os.environ["MOODLE_USERNAME"]  # student ID
     MOODLE_PASSWORD = os.environ["MOODLE_PASSWORD"]
 
