@@ -2,6 +2,7 @@ import time
 import logging
 import requests
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -10,7 +11,8 @@ logger = logging.getLogger(__name__)
 def _format_date(ts):
     if not ts:
         return "No deadline set"
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+    tz = ZoneInfo(Config.TIMEZONE)
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(tz)
     return dt.strftime("%A, %d %b %Y at %I:%M %p")
 
 
