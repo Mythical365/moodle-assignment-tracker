@@ -16,3 +16,4 @@ class Config:
     # App
     CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "1800"))  # 30 min
     DATABASE_PATH = os.getenv("DATABASE_PATH", "tracker.db")
+    TIMEZONE = os.getenv("TIMEZONE", "Africa/Cairo")
