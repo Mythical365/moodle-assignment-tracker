@@ -289,3 +289,18 @@ def send_reminders(assignments, quizzes):
         "Reminder sent for %d item(s)",
         total,
     )
+
+def send_test_notification():
+    _post_webhook({
+        "content": "🧪 **Moodle Tracker test notification**",
+        "embeds": [{
+            "title": "Discord Webhook Test",
+            "description": (
+                "GitHub Actions → Moodle Tracker → Discord "
+                "is working! ✅"
+            ),
+            "color": 0x3498DB,
+        }],
+    })
+
+    logger.info("Discord test notification sent")
