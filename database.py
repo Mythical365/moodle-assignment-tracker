@@ -1,82 +1,97 @@
 import os
 import time
 import logging
-import requests
+
+import psycopg
+from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set")
 
-HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json",
-}
+
+def _connect():
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def init_db():
-    pass  # Supabase table is created in the dashboard
+    """Create the tracker table if it does not exist yet."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seen_items (
+                    id TEXT PRIMARY KEY,
+                    item_type TEXT NOT NULL,
+                    due_date BIGINT NOT NULL DEFAULT 0,
+                    name TEXT NOT NULL DEFAULT '',
+                    course_name TEXT NOT NULL DEFAULT '',
+                    reminded BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 def _get(item_id):
-    res = requests.get(
-        f"{SUPABASE_URL}/rest/v1/seen_items?id=eq.{item_id}&select=*",
-        headers=HEADERS,
-    )
-    data = res.json()
-    if not isinstance(data, list):
-        logger.error("Supabase _get error for %s: %s", item_id, data)
-        return None
-    return data[0] if data else None
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, item_type, due_date, name, course_name, reminded
+                FROM seen_items
+                WHERE id = %s
+                """,
+                (item_id,),
+            )
+            return cur.fetchone()
 
 
 def _upsert(item_id, item_type, due_date, name, course_name):
-    """Insert or update a row. Never touches the `reminded` column so it
-    keeps its value on updates."""
-    res = requests.post(
-        f"{SUPABASE_URL}/rest/v1/seen_items",
-        headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
-        json={
-            "id": item_id,
-            "item_type": item_type,
-            "due_date": due_date,
-            "name": name,
-            "course_name": course_name,
-        },
-    )
-    if res.status_code not in (200, 201):
-        logger.error("Supabase _upsert failed for %s (HTTP %d): %s", item_id, res.status_code, res.text)
+    """Insert or update a row without changing the reminded flag."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO seen_items
+                    (id, item_type, due_date, name, course_name)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    item_type = EXCLUDED.item_type,
+                    due_date = EXCLUDED.due_date,
+                    name = EXCLUDED.name,
+                    course_name = EXCLUDED.course_name
+                """,
+                (
+                    item_id,
+                    item_type,
+                    due_date or 0,
+                    name or "",
+                    course_name or "",
+                ),
+            )
 
-
-# ---------------------------------------------------------------------------
-# Assignments
-# ---------------------------------------------------------------------------
 
 def check_assignment(assignment_id, due_date):
     row = _get(f"assign_{assignment_id}")
     if not row:
         return "new"
-    if row["due_date"] != due_date:
+    if row["due_date"] != (due_date or 0):
         return "reactivated"
     return None
 
 
 def save_assignment(a):
     _upsert(
-        f"assign_{a['id']}", "assignment",
+        f"assign_{a['id']}",
+        "assignment",
         a.get("duedate", 0),
-        a["name"], a.get("_course_name", ""),
+        a["name"],
+        a.get("_course_name", ""),
     )
 
-
-# ---------------------------------------------------------------------------
-# Quizzes
-# ---------------------------------------------------------------------------
 
 def check_quiz(quiz_id, close_time):
     row = _get(f"quiz_{quiz_id}")
@@ -89,15 +104,13 @@ def check_quiz(quiz_id, close_time):
 
 def save_quiz(q, course_id, course_name):
     _upsert(
-        f"quiz_{q['id']}", "quiz",
+        f"quiz_{q['id']}",
+        "quiz",
         q.get("timeclose", 0),
-        q["name"], course_name,
+        q["name"],
+        course_name,
     )
 
-
-# ---------------------------------------------------------------------------
-# Resources (uploaded files / folders)
-# ---------------------------------------------------------------------------
 
 def check_resource(module_id, timemodified):
     row = _get(f"resource_{module_id}")
@@ -110,15 +123,13 @@ def check_resource(module_id, timemodified):
 
 def save_resource(r):
     _upsert(
-        f"resource_{r['id']}", "resource",
+        f"resource_{r['id']}",
+        "resource",
         r.get("timemodified", 0),
-        r["name"], r.get("_course_name", ""),
+        r["name"],
+        r.get("_course_name", ""),
     )
 
-
-# ---------------------------------------------------------------------------
-# Forum / announcement posts
-# ---------------------------------------------------------------------------
 
 def check_forum_post(discussion_id):
     return "new" if not _get(f"forum_{discussion_id}") else None
@@ -126,41 +137,54 @@ def check_forum_post(discussion_id):
 
 def save_forum_post(d):
     _upsert(
-        f"forum_{d['id']}", "forum",
+        f"forum_{d['id']}",
+        "forum",
         d.get("created", 0),
-        d.get("name", ""), d.get("_course_name", ""),
+        d.get("name", ""),
+        d.get("_course_name", ""),
     )
 
-
-# ---------------------------------------------------------------------------
-# Due-date reminders
-# ---------------------------------------------------------------------------
 
 def get_items_due_soon():
     """Return assignments and quizzes due within 24h that haven't been reminded yet."""
     now = int(time.time())
     window = now + 86400
 
-    assignments, quizzes = [], []
-    for item_type in ("assignment", "quiz"):
-        res = requests.get(
-            f"{SUPABASE_URL}/rest/v1/seen_items"
-            f"?item_type=eq.{item_type}"
-            f"&due_date=gt.{now}"
-            f"&due_date=lte.{window}"
-            f"&reminded=eq.false"
-            f"&select=*",
-            headers=HEADERS,
-        )
-        bucket = assignments if item_type == "assignment" else quizzes
-        bucket.extend(res.json())
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, item_type, due_date, name, course_name, reminded
+                FROM seen_items
+                WHERE item_type = %s
+                  AND due_date > %s
+                  AND due_date <= %s
+                  AND reminded = FALSE
+                """,
+                ("assignment", now, window),
+            )
+            assignments = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT id, item_type, due_date, name, course_name, reminded
+                FROM seen_items
+                WHERE item_type = %s
+                  AND due_date > %s
+                  AND due_date <= %s
+                  AND reminded = FALSE
+                """,
+                ("quiz", now, window),
+            )
+            quizzes = cur.fetchall()
 
     return assignments, quizzes
 
 
 def mark_reminded(item_id):
-    requests.patch(
-        f"{SUPABASE_URL}/rest/v1/seen_items?id=eq.{item_id}",
-        headers=HEADERS,
-        json={"reminded": True},
-    )
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE seen_items SET reminded = TRUE WHERE id = %s",
+                (item_id,),
+            )
