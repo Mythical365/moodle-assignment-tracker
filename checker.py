@@ -20,7 +20,11 @@ from database import (
     check_forum_post, save_forum_post,
     get_items_due_soon, mark_reminded,
 )
-from notifier import send_notification, send_reminders
+from notifier import (
+    send_notification,
+    send_reminders,
+    send_test_notification,
+)
 
 logging.basicConfig(
     level=logging.INFO,
