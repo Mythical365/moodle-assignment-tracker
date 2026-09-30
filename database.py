@@ -33,6 +33,7 @@ def init_db():
                 )
                 """
             )
+            conn.commit()
 
 
 def _get(item_id):
@@ -72,6 +73,7 @@ def _upsert(item_id, item_type, due_date, name, course_name):
                     course_name or "",
                 ),
             )
+        conn.commit()
 
 
 def check_assignment(assignment_id, due_date):
@@ -188,3 +190,4 @@ def mark_reminded(item_id):
                 "UPDATE seen_items SET reminded = TRUE WHERE id = %s",
                 (item_id,),
             )
+        conn.commit()
