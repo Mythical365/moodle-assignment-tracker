@@ -26,4 +26,4 @@ jobs:
           MOODLE_PASSWORD: ${{ secrets.MOODLE_PASSWORD }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python3 checker.py --once
+        run: python3 checker.py --test-discord
