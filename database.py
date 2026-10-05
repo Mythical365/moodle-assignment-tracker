@@ -16,6 +16,16 @@ if not DATABASE_URL:
 # sit "idle in transaction" and the Neon compute can suspend normally.
 _conn = None
 
+# All known rows, loaded with ONE query per run instead of one query per item.
+# Maps id -> row dict. It is kept in sync by _upsert / mark_reminded, and
+# reset_cache() forces a reload (checker.py calls it at the start of each run).
+_seen = None
+
+
+def reset_cache():
+    global _seen
+    _seen = None
+
 
 def _connect():
     global _conn
@@ -36,6 +46,7 @@ def close_db():
     if _conn is not None and not _conn.closed:
         _conn.close()
     _conn = None
+    reset_cache()
 
 
 def _run(sql, params=(), fetch=None):
@@ -80,16 +91,22 @@ def init_db():
     )
 
 
-def _get(item_id):
-    return _run(
+def _load_seen():
+    global _seen
+    rows = _run(
         """
         SELECT id, item_type, due_date, name, course_name, reminded
         FROM seen_items
-        WHERE id = %s
         """,
-        (item_id,),
-        fetch="one",
+        fetch="all",
     )
+    _seen = {r["id"]: r for r in rows}
+    return _seen
+
+
+def _get(item_id):
+    seen = _seen if _seen is not None else _load_seen()
+    return seen.get(item_id)
 
 
 def _upsert(item_id, item_type, due_date, name, course_name):
@@ -121,6 +138,20 @@ def _upsert(item_id, item_type, due_date, name, course_name):
             course_name or "",
         ),
     )
+
+    if _seen is not None:
+        prev = _seen.get(item_id)
+        _seen[item_id] = {
+            "id": item_id,
+            "item_type": item_type,
+            "due_date": due_date or 0,
+            "name": name or "",
+            "course_name": course_name or "",
+            # Mirrors the SQL: reminded is kept unless the due date changed.
+            "reminded": bool(
+                prev and prev["reminded"] and prev["due_date"] == (due_date or 0)
+            ),
+        }
 
 
 def check_assignment(assignment_id, due_date):
@@ -223,3 +254,6 @@ def mark_reminded(item_id):
         "UPDATE seen_items SET reminded = TRUE WHERE id = %s",
         (item_id,),
     )
+
+    if _seen is not None and item_id in _seen:
+        _seen[item_id]["reminded"] = True

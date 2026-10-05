@@ -16,6 +16,7 @@ from moodle_client import MoodleClient
 from database import (
     init_db,
     close_db,
+    reset_cache,
     check_assignment,
     save_assignment,
     check_quiz,
@@ -54,6 +55,7 @@ def is_future(ts):
 
 def run_check():
     logger.info("Starting Moodle check...")
+    reset_cache()  # reload seen-items once per run (matters in loop mode)
 
     try:
         (
