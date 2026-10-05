@@ -1,19 +1,19 @@
 # Moodle Assignment/Quiz Tracker
 
 ## Project Overview
-Automated Python script that monitors MSA University's Moodle portal (`e-learning.msa.edu.eg`) every 30 minutes and sends Discord notifications when new assignments or quizzes appear. Deployed on Railway.app (free tier).
+Automated Python script that monitors MSA University's Moodle portal (`e-learning.msa.edu.eg`) every 30 minutes and sends Discord notifications when new assignments or quizzes appear. Runs on a GitHub Actions cron (every 30 min, `checker.py --once`); `Procfile` is kept for optional Railway/loop mode.
 
 ## Architecture
 - **No web framework** — pure Python script running in an infinite loop (`checker.py`)
 - **Moodle REST API** via `moodle_mobile_app` web service for data fetching
-- **SQLite** (`tracker.db`) for tracking seen items and detecting reactivated ones
+- **Neon (serverless Postgres)** via `psycopg` (`DATABASE_URL`) for tracking seen items and detecting reactivated ones
 - **Discord webhook** for notifications (replaced Gmail — App Passwords were unavailable)
 - **Railway.app** for hosting (Procfile-based deployment)
 
 ## File Structure
 - `config.py` — loads env vars (Moodle creds, Discord webhook URL, check interval)
 - `moodle_client.py` — Moodle API client (auth, courses, assignments, quizzes). Token auto-retry on expiry.
-- `database.py` — SQLite schema, seen-checking, reactivation detection via date comparison
+- `database.py` — Neon/Postgres schema, seen-checking, reactivation detection via date comparison (single reused connection, auto-reconnect)
 - `notifier.py` — builds Discord embed messages and sends via webhook
 - `checker.py` — main entry point. Infinite loop with `--once` flag for testing
 - `Procfile` — `worker: python3 checker.py` (Railway reads this)

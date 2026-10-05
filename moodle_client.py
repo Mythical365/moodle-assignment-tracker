@@ -11,7 +11,9 @@ class MoodleClient:
         self.token = None
         self.user_id = None
         self.session = requests.Session()
-        self.session.timeout = 30
+        # requests.Session ignores a `timeout` attribute, so the timeout
+        # is passed explicitly on every call below.
+        self.timeout = 30
 
     def _api(self, wsfunction, **params):
         """Make an authenticated Moodle REST API call."""
@@ -22,7 +24,7 @@ class MoodleClient:
             "moodlewsrestformat": "json",
             **params,
         }
-        resp = self.session.post(url, data=payload)
+        resp = self.session.post(url, data=payload, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
 
@@ -41,6 +43,7 @@ class MoodleClient:
                 "password": Config.MOODLE_PASSWORD,
                 "service": "moodle_mobile_app",
             },
+            timeout=self.timeout,
         )
         resp.raise_for_status()
         data = resp.json()

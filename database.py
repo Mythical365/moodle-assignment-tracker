@@ -11,69 +11,116 @@ DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set")
 
+# One connection is reused for the whole run instead of opening a new one per
+# query. autocommit=True means every statement commits immediately, so we never
+# sit "idle in transaction" and the Neon compute can suspend normally.
+_conn = None
+
 
 def _connect():
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    global _conn
+    if _conn is None or _conn.closed:
+        # connect_timeout covers Neon waking up from a cold start.
+        _conn = psycopg.connect(
+            DATABASE_URL,
+            row_factory=dict_row,
+            autocommit=True,
+            connect_timeout=15,
+        )
+    return _conn
+
+
+def close_db():
+    """Close the shared connection (safe to call more than once)."""
+    global _conn
+    if _conn is not None and not _conn.closed:
+        _conn.close()
+    _conn = None
+
+
+def _run(sql, params=(), fetch=None):
+    """Execute one statement, reconnecting once if the connection dropped.
+
+    Every statement here is idempotent (SELECT, upsert, UPDATE ... SET flag),
+    so retrying after a dropped connection is safe. In loop mode the process
+    sleeps for 30 min between checks, long enough for Neon to close an idle
+    connection, so this matters.
+    """
+    for attempt in (1, 2):
+        try:
+            with _connect().cursor() as cur:
+                cur.execute(sql, params)
+                if fetch == "one":
+                    return cur.fetchone()
+                if fetch == "all":
+                    return cur.fetchall()
+                return None
+        except psycopg.OperationalError as e:
+            logger.warning("DB connection problem (attempt %d/2): %s", attempt, e)
+            close_db()
+            if attempt == 2:
+                raise
+            time.sleep(2)
 
 
 def init_db():
     """Create the tracker table if it does not exist yet."""
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS seen_items (
-                    id TEXT PRIMARY KEY,
-                    item_type TEXT NOT NULL,
-                    due_date BIGINT NOT NULL DEFAULT 0,
-                    name TEXT NOT NULL DEFAULT '',
-                    course_name TEXT NOT NULL DEFAULT '',
-                    reminded BOOLEAN NOT NULL DEFAULT FALSE,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-            conn.commit()
+    _run(
+        """
+        CREATE TABLE IF NOT EXISTS seen_items (
+            id TEXT PRIMARY KEY,
+            item_type TEXT NOT NULL,
+            due_date BIGINT NOT NULL DEFAULT 0,
+            name TEXT NOT NULL DEFAULT '',
+            course_name TEXT NOT NULL DEFAULT '',
+            reminded BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
 
 
 def _get(item_id):
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, item_type, due_date, name, course_name, reminded
-                FROM seen_items
-                WHERE id = %s
-                """,
-                (item_id,),
-            )
-            return cur.fetchone()
+    return _run(
+        """
+        SELECT id, item_type, due_date, name, course_name, reminded
+        FROM seen_items
+        WHERE id = %s
+        """,
+        (item_id,),
+        fetch="one",
+    )
 
 
 def _upsert(item_id, item_type, due_date, name, course_name):
-    """Insert or update a row without changing the reminded flag."""
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO seen_items
-                    (id, item_type, due_date, name, course_name)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    item_type = EXCLUDED.item_type,
-                    due_date = EXCLUDED.due_date,
-                    name = EXCLUDED.name,
-                    course_name = EXCLUDED.course_name
-                """,
-                (
-                    item_id,
-                    item_type,
-                    due_date or 0,
-                    name or "",
-                    course_name or "",
-                ),
-            )
-        conn.commit()
+    """Insert or update a row.
+
+    `reminded` is kept on normal updates, but reset to FALSE when the due date
+    changes, so a postponed deadline gets its 24h reminder again.
+    """
+    _run(
+        """
+        INSERT INTO seen_items
+            (id, item_type, due_date, name, course_name)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET
+            item_type = EXCLUDED.item_type,
+            due_date = EXCLUDED.due_date,
+            name = EXCLUDED.name,
+            course_name = EXCLUDED.course_name,
+            reminded = CASE
+                WHEN seen_items.due_date <> EXCLUDED.due_date THEN FALSE
+                ELSE seen_items.reminded
+            END
+        """,
+        (
+            item_id,
+            item_type,
+            due_date or 0,
+            name or "",
+            course_name or "",
+        ),
+    )
 
 
 def check_assignment(assignment_id, due_date):
@@ -152,42 +199,27 @@ def get_items_due_soon():
     now = int(time.time())
     window = now + 86400
 
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, item_type, due_date, name, course_name, reminded
-                FROM seen_items
-                WHERE item_type = %s
-                  AND due_date > %s
-                  AND due_date <= %s
-                  AND reminded = FALSE
-                """,
-                ("assignment", now, window),
-            )
-            assignments = cur.fetchall()
+    rows = _run(
+        """
+        SELECT id, item_type, due_date, name, course_name, reminded
+        FROM seen_items
+        WHERE item_type IN ('assignment', 'quiz')
+          AND due_date > %s
+          AND due_date <= %s
+          AND reminded = FALSE
+        ORDER BY due_date
+        """,
+        (now, window),
+        fetch="all",
+    )
 
-            cur.execute(
-                """
-                SELECT id, item_type, due_date, name, course_name, reminded
-                FROM seen_items
-                WHERE item_type = %s
-                  AND due_date > %s
-                  AND due_date <= %s
-                  AND reminded = FALSE
-                """,
-                ("quiz", now, window),
-            )
-            quizzes = cur.fetchall()
-
+    assignments = [r for r in rows if r["item_type"] == "assignment"]
+    quizzes = [r for r in rows if r["item_type"] == "quiz"]
     return assignments, quizzes
 
 
 def mark_reminded(item_id):
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE seen_items SET reminded = TRUE WHERE id = %s",
-                (item_id,),
-            )
-        conn.commit()
+    _run(
+        "UPDATE seen_items SET reminded = TRUE WHERE id = %s",
+        (item_id,),
+    )
