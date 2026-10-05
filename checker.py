@@ -15,6 +15,8 @@ from config import Config
 from moodle_client import MoodleClient
 from database import (
     init_db,
+    close_db,
+    reset_cache,
     check_assignment,
     save_assignment,
     check_quiz,
@@ -53,6 +55,7 @@ def is_future(ts):
 
 def run_check():
     logger.info("Starting Moodle check...")
+    reset_cache()  # reload seen-items once per run (matters in loop mode)
 
     try:
         (
@@ -67,6 +70,9 @@ def run_check():
         logger.error("Failed to fetch from Moodle: %s", e)
         return
 
+    # Items are only *detected* here. They are written to the database after
+    # the Discord notification succeeds, so a failed notification is retried on
+    # the next run instead of being silently lost.
     new_assignments = []
     new_quizzes = []
     new_resources = []
@@ -82,7 +88,6 @@ def run_check():
         reason = check_assignment(a["id"], due)
 
         if reason:
-            save_assignment(a)
             new_assignments.append((a, reason))
 
             logger.info(
@@ -113,12 +118,6 @@ def run_check():
         )
 
         if reason:
-            save_quiz(
-                q,
-                course_id,
-                course_name,
-            )
-
             new_quizzes.append((q, reason))
 
             logger.info(
@@ -136,7 +135,6 @@ def run_check():
         )
 
         if reason:
-            save_resource(r)
             new_resources.append((r, reason))
 
             logger.info(
@@ -150,7 +148,6 @@ def run_check():
     # Forum announcements
     for d in discussions:
         if check_forum_post(d["id"]):
-            save_forum_post(d)
             new_posts.append(d)
 
             logger.info(
@@ -159,7 +156,7 @@ def run_check():
                 d["_course_name"],
             )
 
-    # Notifications
+    # Notifications, then persist
     if (
         new_assignments
         or new_quizzes
@@ -185,9 +182,23 @@ def run_check():
 
         except Exception as e:
             logger.error(
-                "Failed to send notification: %s",
+                "Failed to send notification (items NOT saved, "
+                "will retry next run): %s",
                 e,
             )
+
+        else:
+            for a, _ in new_assignments:
+                save_assignment(a)
+
+            for q, _ in new_quizzes:
+                save_quiz(q, q.get("course"), q["_course_name"])
+
+            for r, _ in new_resources:
+                save_resource(r)
+
+            for d in new_posts:
+                save_forum_post(d)
 
     else:
         logger.info("No new items found.")
@@ -249,7 +260,10 @@ def main():
 
     # Run once and exit
     if "--once" in sys.argv:
-        run_check()
+        try:
+            run_check()
+        finally:
+            close_db()
         return
 
     # Normal continuous mode
@@ -259,7 +273,10 @@ def main():
     )
 
     while True:
-        run_check()
+        try:
+            run_check()
+        except Exception:
+            logger.exception("Check failed; will retry next interval")
         time.sleep(
             Config.CHECK_INTERVAL_SECONDS
         )
